@@ -105,7 +105,7 @@ struct ProviderUsageItemVisibilityTests {
         ])
 
         #expect(projected.metrics.map(\.id) == ["secondary"])
-        #expect(projected.codexResetCredits != nil)
+        #expect(projected.limitResetCredits != nil)
         #expect(projected.creditsText == nil)
         #expect(projected.creditsRemaining == nil)
         #expect(projected.creditsProgressPercent == nil)
@@ -208,6 +208,20 @@ struct ProviderUsageItemVisibilityTests {
     }
 
     @Test
+    func `hiding a remembered section preserves details without identity metadata`() throws {
+        let model = try Self.model(
+            provider: .zai,
+            metricIDs: ["primary"],
+            detailSections: [ProviderDetailSection(title: "New details", rows: [])],
+            detailRawTitles: [])
+
+        let projected = model.applyingUsageItemVisibility(hiddenItemIDs: [.detailSection("Old details")])
+
+        #expect(projected.providerDetails.map(\.title) == ["New details"])
+        #expect(projected.providerDetailRawTitles == [nil])
+    }
+
+    @Test
     func `a hidden detail section the provider stopped reporting stays restorable`() throws {
         let model = try Self.model(
             provider: .zai,
@@ -222,6 +236,20 @@ struct ProviderUsageItemVisibilityTests {
             "detailSection:Quota details",
         ])
         #expect(descriptors.last?.title == "Quota details (unavailable)")
+    }
+
+    @Test
+    func `unavailable detail labels respect privacy without changing stored identity`() {
+        let model = Self.model(provider: .zai, metricIDs: [])
+        let item = ProviderUsageItemID.detailSection("Quota for fixture@example.com")
+        let hidden: Set<ProviderUsageItemID> = [item]
+
+        let privateItems = model.usageItemDescriptors(includingHidden: hidden, hidePersonalInfo: true)
+        let visibleItems = model.usageItemDescriptors(includingHidden: hidden, hidePersonalInfo: false)
+
+        #expect(privateItems.last?.id == item)
+        #expect(privateItems.last?.title.contains("fixture@example.com") == false)
+        #expect(visibleItems.last?.title == "Quota for fixture@example.com (unavailable)")
     }
 
     @Test
@@ -465,8 +493,8 @@ struct ProviderUsageItemVisibilityTests {
             creditsScaleText: showsCredits ? "$25" : nil,
             creditsHintText: showsCredits ? "Available balance" : nil,
             creditsHintCopyText: showsCredits ? "Available balance" : nil,
-            codexResetCredits: showsResetCredits
-                ? CodexResetCreditsPresentation(
+            limitResetCredits: showsResetCredits
+                ? LimitResetCreditsPresentation(
                     text: "1 available",
                     items: [.init(expiryText: "Expires tomorrow", compactExpiryText: "tomorrow")])
                 : nil,

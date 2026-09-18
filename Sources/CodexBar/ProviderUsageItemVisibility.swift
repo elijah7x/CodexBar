@@ -11,7 +11,6 @@ struct ProviderUsageItemID: Hashable, Sendable {
         self.rawValue.hasPrefix(Self.metricPrefix) ? String(self.rawValue.dropFirst(Self.metricPrefix.count)) : nil
     }
 
-    /// Raw, pre-localization title of the detail section this ID addresses, when it is one.
     var detailSectionTitle: String? {
         self.rawValue.hasPrefix(Self.detailSectionPrefix)
             ? String(self.rawValue.dropFirst(Self.detailSectionPrefix.count)) : nil
@@ -24,8 +23,6 @@ struct ProviderUsageItemID: Hashable, Sendable {
         Self(rawValue: "\(self.metricPrefix)\(metricID)")
     }
 
-    /// Detail sections are keyed by the provider-owned English title they are reported with, so the
-    /// stored choice survives app-language changes and syncs between devices running other locales.
     static func detailSection(_ rawTitle: String) -> Self {
         Self(rawValue: "\(self.detailSectionPrefix)\(rawTitle)")
     }
@@ -45,7 +42,7 @@ extension ProviderUsageItemID {
         case .codexResetCredits: return L("Limit Reset Credits")
         default:
             if let detailSectionTitle {
-                return detailSectionTitle
+                return L(detailSectionTitle)
             }
             guard let metricID = self.metricID else { return self.rawValue }
             if metricID == "claude-routines" {
@@ -75,7 +72,7 @@ extension UsageMenuCardView.Model {
                 title: UsageMenuCardView.popupMetricTitle(provider: self.provider, metric: metric))
         }
         // Provider-specific by design: Codex reset credits are a non-metric section with their own visibility choice.
-        if self.provider == .codex, self.codexResetCredits != nil {
+        if self.provider == .codex, self.limitResetCredits != nil {
             descriptors.append(ProviderUsageItemDescriptor(
                 id: .codexResetCredits,
                 title: L("Limit Reset Credits")))
@@ -83,27 +80,16 @@ extension UsageMenuCardView.Model {
         if self.creditsText != nil {
             descriptors.append(ProviderUsageItemDescriptor(id: .credits, title: L("Credits")))
         }
-        descriptors.append(contentsOf: self.detailSectionDescriptors())
+        let costSummaryTitles = ProviderDescriptorRegistry
+            .descriptor(for: self.provider).presentation.optionalDetails.costSummaryTitles
+        descriptors.append(contentsOf: zip(self.providerDetails, self.providerDetailRawTitles)
+            .compactMap { section, rawTitle in
+                guard let rawTitle, let title = section.title, !costSummaryTitles.contains(rawTitle) else { return nil }
+                return ProviderUsageItemDescriptor(id: .detailSection(rawTitle), title: title)
+            })
 
         var seen = Set<ProviderUsageItemID>()
         return descriptors.filter { seen.insert($0.id).inserted }
-    }
-
-    /// Provider detail sections (e.g. z.ai's "Quota details") as visibility items.
-    ///
-    /// Titles shown in Settings are the localized ones already present on the model; the stored ID
-    /// uses the raw pre-localization title carried beside them. Cost-summary sections stay owned by
-    /// the cost summary style picker, and untitled sections have no stable key, so both are skipped.
-    private func detailSectionDescriptors() -> [ProviderUsageItemDescriptor] {
-        let costSummaryTitles = ProviderDescriptorRegistry
-            .descriptor(for: self.provider).presentation.optionalDetails.costSummaryTitles
-        return zip(self.providerDetails, self.providerDetailRawTitles).compactMap { section, rawTitle in
-            guard let rawTitle,
-                  let localizedTitle = section.title,
-                  !costSummaryTitles.contains(rawTitle)
-            else { return nil }
-            return ProviderUsageItemDescriptor(id: .detailSection(rawTitle), title: localizedTitle)
-        }
     }
 
     /// `usageItemDescriptors` plus a row for every hidden item the provider stopped reporting.
@@ -112,7 +98,7 @@ extension UsageMenuCardView.Model {
     /// these placeholders its checkbox disappears while the selection stays stored, so the only way
     /// back is Restore Defaults, which also discards every other choice.
     @MainActor
-    func usageItemDescriptors(includingHidden hiddenItemIDs: Set<ProviderUsageItemID>)
+    func usageItemDescriptors(includingHidden hiddenItemIDs: Set<ProviderUsageItemID>, hidePersonalInfo: Bool = false)
         -> [ProviderUsageItemDescriptor]
     {
         var descriptors = self.usageItemDescriptors
@@ -120,9 +106,11 @@ extension UsageMenuCardView.Model {
 
         let reported = Set(descriptors.map(\.id))
         for itemID in hiddenItemIDs.subtracting(reported).sorted(by: { $0.rawValue < $1.rawValue }) {
+            let rawTitle = itemID.unreportedTitle(for: self.provider)
+            let title = PersonalInfoRedactor.redactEmails(in: rawTitle, isEnabled: hidePersonalInfo) ?? rawTitle
             descriptors.append(ProviderUsageItemDescriptor(
                 id: itemID,
-                title: L("%@ (unavailable)", itemID.unreportedTitle(for: self.provider))))
+                title: L("%@ (unavailable)", title)))
         }
         return descriptors
     }
@@ -140,19 +128,19 @@ extension UsageMenuCardView.Model {
             projected.creditsHintCopyText = nil
         }
         if hiddenItemIDs.contains(.codexResetCredits) {
-            projected.codexResetCredits = nil
+            projected.limitResetCredits = nil
         }
-        let hiddenDetailTitles = Set(hiddenItemIDs.compactMap(\.detailSectionTitle))
-        if !hiddenDetailTitles.isEmpty {
-            var keptSections: [ProviderDetailSection] = []
-            var keptTitles: [String?] = []
-            for (section, rawTitle) in zip(self.providerDetails, self.providerDetailRawTitles) {
-                if let rawTitle, hiddenDetailTitles.contains(rawTitle) { continue }
-                keptSections.append(section)
-                keptTitles.append(rawTitle)
+        let hiddenTitles = Set(hiddenItemIDs.compactMap(\.detailSectionTitle))
+        if !hiddenTitles.isEmpty {
+            let kept = self.providerDetails.enumerated().compactMap { index, section
+                -> (section: ProviderDetailSection, rawTitle: String?)? in
+                let rawTitle = self.providerDetailRawTitles.indices.contains(index)
+                    ? self.providerDetailRawTitles[index] : nil
+                guard rawTitle.map({ !hiddenTitles.contains($0) }) ?? true else { return nil }
+                return (section, rawTitle)
             }
-            projected.providerDetails = keptSections
-            projected.providerDetailRawTitles = keptTitles
+            projected.providerDetails = kept.map(\.section)
+            projected.providerDetailRawTitles = kept.map(\.rawTitle)
         }
         return projected
     }
